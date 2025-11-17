@@ -1,0 +1,70 @@
+name: Linux DEB Build for Testing
+
+on:
+  push:
+    branches: cardFlowNav
+  workflow_dispatch:
+
+jobs:
+  build-linux-deb:
+    name: Build Linux DEB
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      NODE_VERSION: 20.19.4
+      ELECTRON_ENV: adhoc  # or staging / production
+      # Optional:
+      # S3_BUCKET: your-custom-bucket
+      # PULL_REQUEST_NUMBER: 123
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Show build info
+        run: |
+          echo "Building branch: $GITHUB_REF_NAME"
+          echo "Electron environment: $ELECTRON_ENV"
+
+      - name: Install system dependencies for Linux builds
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm fakeroot dpkg libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+          libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+          libxrandr2 libgbm1 libpango-1.0-0 libcairo2 alsa-utils libgtk-3-0
+
+
+      - name: Install JS dependencies
+        run: npm ci --registry=https://registry.npmjs.org --prefer-online --retry=3
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Build Desktop App and Package as DEB
+        run: |
+          npm run desktop-build
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p build-output
+          find desktop-build -name "*.deb" -type f -exec cp {} build-output/ \;
+          cd build-output
+          for file in *.deb; do
+            if [ -f "$file" ]; then
+              echo "Found: $file"
+            fi
+          done
+          ls -lah
+
+      - name: Upload DEB artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-deb
+          path: build-output/*.deb
