@@ -4,7 +4,12 @@ on:
   push:
     branches: cardFlowNav
   workflow_dispatch:
-
+    inputs:
+      branch:
+        description: "Branch to build"
+        default: "cardFlowNav"
+        required: false
+        type: string
 jobs:
   build-linux-deb:
     name: Build Linux DEB
