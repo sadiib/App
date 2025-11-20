@@ -1,4 +1,4 @@
-const {version} = require('../package.json');
+const { version } = require('../package.json');
 
 const pullRequestNumber = process.env.PULL_REQUEST_NUMBER;
 
@@ -20,8 +20,14 @@ const macIcon = {
     adhoc: './desktop/icon-adhoc.png',
 };
 
-const isCorrectElectronEnv = ['production', 'staging', 'adhoc'].includes(process.env.ELECTRON_ENV);
+// Linux icon configuration
+const linuxIcon = {
+    production: './desktop/icon.png',
+    staging: './desktop/icon-stg.png',
+    adhoc: './desktop/icon-adhoc.png',
+};
 
+const isCorrectElectronEnv = ['production', 'staging', 'adhoc'].includes(process.env.ELECTRON_ENV);
 if (!isCorrectElectronEnv) {
     throw new Error('Invalid ELECTRON_ENV!');
 }
@@ -30,17 +36,12 @@ const getMacBundleIconName = () => {
     if (process.env.ELECTRON_ENV === 'adhoc') {
         return 'AppIcon-adhoc';
     }
-
     if (process.env.ELECTRON_ENV === 'development') {
         return 'AppIcon-dev';
     }
-
     return 'AppIcon';
 };
 
-/**
- * The configuration for the debug, production and staging Electron builds.
- */
 module.exports = {
     appId: 'com.expensifyreactnative.chat',
     productName: 'New Expensify',
@@ -48,6 +49,7 @@ module.exports = {
         version,
     },
     asarUnpack: ['**/node-mac-permissions/bin/**'],
+
     mac: {
         category: 'public.app-category.finance',
         icon: macIcon[process.env.ELECTRON_ENV],
@@ -68,27 +70,47 @@ module.exports = {
             NSLocationUsageDescription: 'This app uses location to help you track distance expenses.',
         },
     },
+
     dmg: {
         title: 'New Expensify',
         artifactName: 'NewExpensify.dmg',
         internetEnabled: true,
     },
-    publish: [
-        {
-            provider: 's3',
-            bucket: s3Bucket[process.env.ELECTRON_ENV],
-            channel: 'latest',
-            path: s3Path[process.env.ELECTRON_ENV],
-        },
-    ],
+
+    linux: {
+        target: [
+            {
+                target: 'deb',
+                arch: ['x64'],
+            },
+        ],
+        icon: linuxIcon[process.env.ELECTRON_ENV],
+        category: 'Finance',
+        maintainer: 'Expensify <contact@expensify.com>',
+        synopsis: 'Financial collaboration centered around chat',
+        description: 'The official desktop app for New Expensify — manage receipts, reports, and expenses effortlessly.',
+        artifactName: 'NewExpensify-${version}-${arch}.${ext}',
+        executableName: 'new-expensify',
+    },
+
+    deb: {
+        depends: [],
+        compression: 'xz',
+    },
+
+    publish: null,
+
     files: ['dist', '!dist/www/{.well-known,favicon*}'],
+
     directories: {
         app: 'desktop',
         output: 'desktop-build',
     },
+
     protocols: {
         name: 'New Expensify',
         schemes: ['new-expensify'],
     },
+
     afterPack: 'desktop/dist/afterPack.js',
 };
