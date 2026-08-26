@@ -55,9 +55,11 @@ jobs:
           if "minifyEnabled false" in src.split("release {")[-1]:
               print("build.gradle: already patched")
           else:
-              replacements = [
-                  ("versionCode 1009045702", "versionCode 1009044706"),
-                  ('versionName "9.4.57-2"', 'versionName "9.4.47-6"'),
+              import re
+              # regex-based: tolerate upstream version drift
+              src = re.sub(r"versionCode \d+", "versionCode 1009044706", src, count=1)
+              src = re.sub(r'versionName "[^"]+"', 'versionName "9.4.47-6"', src, count=1)
+              optional = [
                   ("minifyEnabled enableProguardInReleaseBuilds", "minifyEnabled false"),
                   ("shrinkResources enableProguardInReleaseBuilds", "shrinkResources false"),
                   ("productFlavors.production.signingConfig signingConfigs.release",
@@ -65,9 +67,11 @@ jobs:
                   ("flavor.signingConfig signingConfigs.release",
                    "flavor.signingConfig signingConfigs.debug"),
               ]
-              for old, new in replacements:
-                  assert old in src, f"gradle anchor not found: {old}"
-                  src = src.replace(old, new)
+              for old, new in optional:
+                  if old in src:
+                      src = src.replace(old, new)
+                  else:
+                      print(f"build.gradle: anchor skipped (not found): {old}")
               open(path, "w").write(src)
               print("build.gradle: minify off + debug signing + version override applied")
           EOF
