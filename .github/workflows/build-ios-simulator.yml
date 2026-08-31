@@ -1,0 +1,310 @@
+name: Build iOS Simulator for Appetize
+
+on:
+  # Manual trigger only - never build on push
+  workflow_dispatch:
+
+jobs:
+  build-ios-simulator:
+    name: Build iOS Simulator
+    runs-on: macos-latest
+    timeout-minutes: 120
+
+    env:
+      RCT_NEW_ARCH_ENABLED: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply build patches to sources (no repo code edits)
+        run: |
+          set -e
+
+          # ---------- ios/Podfile ----------
+          # 1. Drop NWWebSocket pod (upstream-only dependency, not needed for simulator builds)
+          sed -i.bak "/pod 'NWWebSocket'/d" ios/Podfile && rm -f ios/Podfile.bak
+          grep -q NWWebSocket ios/Podfile && echo "NWWebSocket still present!" || echo "Podfile: NWWebSocket removed"
+
+          # 2. Expand post_install SWIFT_ENABLE_EXPLICIT_MODULES line into the full settings block
+          #    (the exact set that produced the working Codemagic/Appetize builds)
+          python3 << 'EOF'
+          src = open("ios/Podfile").read()
+          if "DEFINES_MODULE" in src:
+              print("Podfile: already patched")
+          else:
+              anchor = "config.build_settings['SWIFT_ENABLE_EXPLICIT_MODULES'] = 'NO'"
+              assert anchor in src, "post_install anchor line not found in Podfile"
+              block = (
+                  "config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '16.4'\n"
+                  "        config.build_settings['DEFINES_MODULE'] = 'YES'\n"
+                  "        config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'\n"
+                  "        config.build_settings['CLANG_ENABLE_EXPLICIT_MODULES'] = 'NO'\n"
+                  "        config.build_settings['ONLY_ACTIVE_ARCH'] = 'YES'\n"
+                  "        config.build_settings['COMPILER_INDEX_STORE_ENABLE'] = 'NO'\n"
+                  "        config.build_settings['SWIFT_ENABLE_EXPLICIT_MODULES'] = 'NO'"
+              )
+              open("ios/Podfile", "w").write(src.replace(anchor, block))
+              print("Podfile: post_install settings block injected")
+          EOF
+
+          # ---------- android/app/build.gradle (parity for future Android CI) ----------
+          python3 << 'EOF'
+          path = "android/app/build.gradle"
+          src = open(path).read()
+          if "minifyEnabled false" in src.split("release {")[-1]:
+              print("build.gradle: already patched")
+          else:
+              import re
+              # regex-based: tolerate upstream version drift
+              src = re.sub(r"versionCode \d+", "versionCode 1009044706", src, count=1)
+              src = re.sub(r'versionName "[^"]+"', 'versionName "9.4.47-6"', src, count=1)
+              optional = [
+                  ("minifyEnabled enableProguardInReleaseBuilds", "minifyEnabled false"),
+                  ("shrinkResources enableProguardInReleaseBuilds", "shrinkResources false"),
+                  ("productFlavors.production.signingConfig signingConfigs.release",
+                   "productFlavors.production.signingConfig signingConfigs.debug"),
+                  ("flavor.signingConfig signingConfigs.release",
+                   "flavor.signingConfig signingConfigs.debug"),
+              ]
+              for old, new in optional:
+                  if old in src:
+                      src = src.replace(old, new)
+                  else:
+                      print(f"build.gradle: anchor skipped (not found): {old}")
+              open(path, "w").write(src)
+              print("build.gradle: minify off + debug signing + version override applied")
+          EOF
+
+          # ---------- src/pages/home/AnnouncementSection.tsx ----------
+          mkdir -p src/pages/home
+          cat > src/pages/home/AnnouncementSection.tsx << 'TSX'
+          import DateIcon from '@components/DateIcon';
+          import MenuItemWithTopDescription from '@components/MenuItemWithTopDescription';
+          import WidgetContainer from '@components/WidgetContainer';
+
+          import useLocalize from '@hooks/useLocalize';
+          import useResponsiveLayout from '@hooks/useResponsiveLayout';
+          import useThemeStyles from '@hooks/useThemeStyles';
+
+          import CONST from '@src/CONST';
+
+          import React from 'react';
+          import {Linking} from 'react-native';
+
+          const announcements = [...CONST.HOME.ANNOUNCEMENTS].sort(
+            (a, b) => b.publishedDate.localeCompare(a.publishedDate)
+          );
+
+          function AnnouncementSection() {
+              const {shouldUseNarrowLayout} = useResponsiveLayout();
+              const {translate} = useLocalize();
+              const styles = useThemeStyles();
+              return (
+                  <WidgetContainer
+                      title={translate('homePage.announcements')}
+                      containerStyles={shouldUseNarrowLayout ? styles.pb2 : styles.pb5}
+                  >
+                      {announcements.map((announcement) => (
+                          <MenuItemWithTopDescription
+                              key={announcement.title}
+                              description={announcement.subtitle}
+                              title={announcement.title}
+                              titleStyle={styles.textBold}
+                              onPress={() => Linking.openURL(announcement.url)}
+                              shouldShowRightIcon
+                              leftComponent={<DateIcon date={announcement.publishedDate} />}
+                              wrapperStyle={[styles.alignItemsCenter, shouldUseNarrowLayout ? styles.ph5 : styles.ph8]}
+                              hasSubMenuItems
+                              viewMode={CONST.OPTION_MODE.COMPACT}
+                              rightIconWrapperStyle={styles.pl2}
+                              shouldCheckActionAllowedOnPress={false}
+                          />
+                      ))}
+                  </WidgetContainer>
+              );
+          }
+
+          export default AnnouncementSection;
+          TSX
+          echo "AnnouncementSection.tsx created"
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26.5.0'
+
+      - name: Setup Bun and NPM
+        run: |
+          curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.bun/bin:$PATH"
+
+          npm install -g npm@11.17.0
+          npm --version
+
+      - name: Fix applyPatches script for macOS
+        run: |
+          if [ -f "./scripts/applyPatches.sh" ]; then
+            sed -i '.bak' 's/mktemp --directory/mktemp -d/g' ./scripts/applyPatches.sh
+            sed -i '.bak' 's/mktemp --tmpdir/mktemp -t/g' ./scripts/applyPatches.sh
+            sed -i '.bak' 's/mktemp -d --tmpdir/mktemp -d -t/g' ./scripts/applyPatches.sh
+            echo "Fixed applyPatches.sh for macOS"
+          fi
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install CocoaPods dependencies & patch targets
+        run: |
+          cd ios
+          # Disable prebuilt React Core artifacts (unsupported for standalone apps -
+          # causes SIGSEGV in Yoga/SafeAreaView under new arch and hides React_RCTAppDelegate)
+          RCT_USE_RN_DEP=0 RCT_USE_PREBUILT_RNCORE=0 pod install --repo-update
+
+          # Safe patch: Force IPHONEOS_DEPLOYMENT_TARGET = 16.4 only in generated Pod .xcconfig files
+          find Pods/Target\ Support\ Files -name "*.xcconfig" -exec sed -i '.bak' 's/IPHONEOS_DEPLOYMENT_TARGET = .*/IPHONEOS_DEPLOYMENT_TARGET = 16.4/g' {} +
+
+          echo "Verification - Updated deployment targets:"
+          grep -r "IPHONEOS_DEPLOYMENT_TARGET" Pods/Target\ Support\ Files/ | head -n 15
+
+      - name: Fix AppIcon for simulator
+        run: |
+          cd ios
+          sed -i '.bak' 's/ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon-dev"/ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon"/' NewExpensify.xcodeproj/project.pbxproj || true
+          echo "AppIcon configuration updated"
+
+      - name: Patch RNFBAnalytics header import order (Clang modules workaround)
+        run: |
+          FILE="node_modules/@react-native-firebase/analytics/ios/RNFBAnalytics/RNFBAnalyticsModule.m"
+          if [ -f "$FILE" ] && ! head -5 "$FILE" | grep -q 'React/RCTBridgeModule.h'; then
+            sed -i '.bak' '1i\
+            #import <React/RCTBridgeModule.h>
+            ' "$FILE"
+            echo "Patched RNFBAnalyticsModule.m import order"
+          else
+            echo "Already patched or file not found"
+          fi
+
+      - name: Bundle JavaScript
+        run: |
+          rm -rf /tmp/metro-* $TMPDIR/metro-* $TMPDIR/haste-* node_modules/.cache || true
+
+          npx react-native bundle \
+            --platform ios \
+            --dev false \
+            --entry-file index.js \
+            --bundle-output ios/main.jsbundle \
+            --assets-dest ios \
+            --reset-cache
+
+          ls -lh ios/main.jsbundle
+
+      - name: Apply simulator-native fixes (Firebase plist + app groups)
+        run: |
+          # Production URLs - internal .dev endpoints don't resolve from public networks
+          cp .env.production .env
+          echo ".env prepared: $(grep ENVIRONMENT .env)"
+          cd ios
+
+          # 1. Use the DEV GoogleService plist so Firebase bundle ID matches com.expensify.chat.dev
+          cp GoogleService-Info-DEV.plist GoogleService-Info.plist
+          echo "Swapped in GoogleService-Info-DEV.plist, BUNDLE_ID now: $(/usr/libexec/PlistBuddy -c 'Print :BUNDLE_ID' GoogleService-Info.plist)"
+
+          # 2. Strip app groups from entitlements (unsigned simulator builds are not entitled
+          #    to app groups -> 'client is not entitled' warnings and -34018 crashes)
+          for f in NewExpensify/NewExpensifyDebugDevelopment.entitlements NewExpensify/NewExpensifyReleaseDevelopment.entitlements NewExpensify/Chat.entitlements; do
+            if [ -f "$f" ]; then
+              /usr/libexec/PlistBuddy -c "Delete :com.apple.security.application-groups" "$f" 2>/dev/null \
+                && echo "Removed app groups from $f" || echo "No app groups in $f (ok)"
+            fi
+          done
+
+      - name: Build iOS Simulator App
+        run: |
+          cd ios
+
+          xcodebuild clean \
+            -workspace "NewExpensify.xcworkspace" \
+            -scheme "New Expensify Dev" \
+            -sdk iphonesimulator \
+            -configuration ReleaseDevelopment
+
+          set -o pipefail
+          xcodebuild \
+            -workspace "NewExpensify.xcworkspace" \
+            -scheme "New Expensify Dev" \
+            -sdk iphonesimulator \
+            -arch arm64 \
+            -configuration ReleaseDevelopment \
+            -derivedDataPath ../build \
+            -allowProvisioningUpdates \
+            ARCHS="arm64" \
+            ONLY_ACTIVE_ARCH=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            SKIP_INSTALL=NO \
+            SKIP_BUNDLING=YES \
+            IPHONEOS_DEPLOYMENT_TARGET=16.4 \
+            CLANG_ENABLE_EXPLICIT_MODULES=NO \
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO \
+            SWIFT_ENABLE_EXPLICIT_MODULE_BUILD=NO \
+            SWIFT_COMPILATION_MODE=singlefile \
+            SWIFT_DISABLE_SAFETY_CHECKS=NO \
+            CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES=YES \
+            build 2>&1 | tee build.log
+
+      - name: Package .app
+        run: |
+          APP_PATH=$(find build/Build/Products/ReleaseDevelopment-iphonesimulator -name "*.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: Could not find .app bundle"
+            exit 1
+          fi
+
+          echo "Found app at: $APP_PATH"
+          cp ios/main.jsbundle "$APP_PATH/"
+
+          if [ -d "ios/assets" ]; then
+            cp -R ios/assets "$APP_PATH/"
+          fi
+
+          cd build/Build/Products/ReleaseDevelopment-iphonesimulator
+          zip -r "../../../../NewExpensify-simulator.zip" "$(basename "$APP_PATH")"
+          ls -lh ../../../../NewExpensify-simulator.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NewExpensify-simulator
+          path: NewExpensify-simulator.zip
+          retention-days: 7
+
+      - name: Upload to Appetize
+        env:
+          APPETIZE_API_TOKEN: ${{ secrets.APPETIZE_API_TOKEN }}
+        run: |
+          RESPONSE=$(curl --silent \
+            --user "${APPETIZE_API_TOKEN}:" \
+            -F "file=@NewExpensify-simulator.zip" \
+            -F "platform=ios" \
+            -F "note=${GITHUB_REF_NAME} - ${GITHUB_SHA}" \
+            https://api.appetize.io/v1/apps)
+
+          echo "Appetize response:"
+          echo "$RESPONSE"
+
+          PUBLIC_KEY=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('publicKey',''))" 2>/dev/null || echo "")
+          if [ -n "$PUBLIC_KEY" ]; then
+            echo "Upload successful!"
+            echo "Appetize URL: https://appetize.io/app/$PUBLIC_KEY"
+          else
+            echo "Upload may have failed, check response above"
+          fi
