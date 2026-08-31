@@ -45,6 +45,7 @@ import {useFocusEffect} from '@react-navigation/native';
 import {isLookingAroundUserSelector, isTrackIntentUserSelector} from '@selectors/Onboarding';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Keyboard} from 'react-native';
+import Onyx from 'react-native-onyx';
 
 import type {AmountSubmitData} from './AmountSubmitDataSync';
 import type {WithWritableReportOrNotFoundProps} from './withWritableReportOrNotFound';
@@ -198,6 +199,18 @@ function IOURequestStepAmount({
     useEffect(() => {
         setSelectedCurrency(originalCurrency);
     }, [originalCurrency]);
+
+    // SURGICAL: force offline when on Create expense > Manual amount screen (one-shot, no push)
+    // Previous onboarding patch caused loop; this waits until user reaches Amount screen then goes offline
+    // so the negative-amount self-DM submit can be tested offline without blocking onboarding.
+    useEffect(() => {
+        const timeout = setTimeout(() => {
+            Onyx.merge(ONYXKEYS.NETWORK, {shouldForceOffline: true});
+            // eslint-disable-next-line no-console
+            console.log('[DEV] surgical auto offline on IOURequestStepAmount (Create expense Manual)');
+        }, 800);
+        return () => clearTimeout(timeout);
+    }, []);
 
     const navigateBack = () => {
         Navigation.goBack(backTo);

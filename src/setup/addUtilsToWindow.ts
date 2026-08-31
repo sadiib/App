@@ -50,6 +50,9 @@ export default function addUtilsToWindow() {
         };
 
         window.setSupportToken = setSupportAuthToken;
+        (window as unknown as {forceOffline?: (v: boolean) => void}).forceOffline = (v = true) => Onyx.merge(ONYXKEYS.NETWORK, {shouldForceOffline: v});
+        // eslint-disable-next-line no-console
+        console.log('[DEV] window.forceOffline(v) available');
 
         // Helper to get current route params
         const getRouteParams = () => {
