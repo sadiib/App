@@ -12,7 +12,7 @@ jobs:
   build-android-emulator:
     name: Build Android Emulator
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       RCT_NEW_ARCH_ENABLED: 1
     steps:
