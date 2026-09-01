@@ -283,8 +283,11 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+          # FIX double-zip: upload .app bundle directly so GitHub's outer zip contains .app at root (single zip)
+          # Previously we uploaded NewExpensify-simulator.zip which GitHub re-zipped -> outer zip containing inner zip -> Appetize "No .app folder found" on manual upload
+          # Keep Package step's zip for Appetize API (uses inner zip directly); artifact is for manual download
           name: NewExpensify-simulator
-          path: NewExpensify-simulator.zip
+          path: build/Build/Products/ReleaseDevelopment-iphonesimulator/*.app
           retention-days: 7
 
       - name: Upload to Appetize
