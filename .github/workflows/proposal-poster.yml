@@ -47,12 +47,13 @@ jobs:
           token: ${{ secrets.CONTENT_PAT }}
           path: content
 
-      - name: Authenticate gh as M00rish
-        run: echo "${{ secrets.M00RISH_PAT }}" | gh auth login --with-token --hostname github.com
-
       - name: Run poster
         working-directory: content
         env:
+          # gh authenticates from GH_TOKEN directly (no `gh auth login`, whose
+          # token validation demands scopes the posting token doesn't need).
+          # post.sh's strict gate still proves the token resolves to M00rish.
+          GH_TOKEN: ${{ secrets.M00RISH_PAT }}
           MODE: ${{ github.event.inputs.mode || vars.POSTER_MODE || 'dry-run' }}
           DISPATCH_ACTION: ${{ github.event.inputs.action || 'none' }}
           DISPATCH_ISSUE: ${{ github.event.inputs.issue_number || '' }}
