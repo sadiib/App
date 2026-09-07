@@ -1,0 +1,69 @@
+name: proposal-poster
+
+# Polls Expensify/App for "Help Wanted" on watched issues and posts stored
+# proposals as M00rish. Drafts + state live in the PRIVATE sadiib/proposals
+# repo; this public fork only hosts this workflow (free runner minutes).
+# Content repo layout (private): proposals/<issue>.md, proposal-bot/state.json,
+# proposal-bot/post.sh (the engine — see it for the full rule set).
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run (default) or post"
+        required: false
+        default: "dry-run"
+      issue_number:
+        description: "Issue number (re-arm actions only)"
+        required: false
+        default: ""
+      action:
+        description: "none, re-arm-only, re-arm-and-post"
+        required: false
+        default: "none"
+      proposal_body:
+        description: "Proposal markdown (re-arm actions only)"
+        required: false
+        default: ""
+
+# Serializes ticks so two runs can never evaluate/post concurrently.
+concurrency:
+  group: proposal-poster
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out private content
+        uses: actions/checkout@v5
+        with:
+          repository: sadiib/proposals
+          token: ${{ secrets.M00RISH_PAT }}
+          path: content
+
+      - name: Authenticate gh as M00rish
+        run: echo "${{ secrets.M00RISH_PAT }}" | gh auth login --with-token --hostname github.com
+
+      - name: Run poster
+        working-directory: content
+        env:
+          MODE: ${{ github.event.inputs.mode || vars.POSTER_MODE || 'dry-run' }}
+          DISPATCH_ACTION: ${{ github.event.inputs.action || 'none' }}
+          DISPATCH_ISSUE: ${{ github.event.inputs.issue_number || '' }}
+          DISPATCH_BODY: ${{ github.event.inputs.proposal_body || '' }}
+        run: ./proposal-bot/post.sh
+
+      - name: Commit state back to private repo
+        working-directory: content
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No state changes."
+            exit 0
+          fi
+          git -c user.name="proposal-poster" -c user.email="proposal-poster@users.noreply.github.com" \
+            commit -m "proposal-poster: update state $(date -u +%FT%TZ)"
+          git push
