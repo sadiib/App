@@ -1,10 +1,13 @@
 name: proposal-poster
 
-# Polls Expensify/App for "Help Wanted" on watched issues and posts stored
-# proposals as M00rish. Drafts + state live in the PRIVATE sadiib/proposals
-# repo; this public fork only hosts this workflow (free runner minutes).
-# Content repo layout (private): proposals/<issue>.md, proposal-bot/state.json,
-# proposal-bot/post.sh (the engine — see it for the full rule set).
+# Secrets (both on this fork):
+#   CONTENT_PAT  — sadiib-side token with Contents R/W on sadiib/proposals
+#                  (classic `repo`, or fine-grained scoped to that repo).
+#                  Used ONLY for checking out the private content and pushing
+#                  state back. Never used for upstream posting.
+#   M00RISH_PAT  — M00rish classic PAT (`public_repo` suffices). Used ONLY to
+#                  authenticate gh for upstream reads + posting. The job aborts
+#                  unless gh resolves to M00rish (strict gate in post.sh).
 
 on:
   schedule:
@@ -41,7 +44,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: sadiib/proposals
-          token: ${{ secrets.M00RISH_PAT }}
+          token: ${{ secrets.CONTENT_PAT }}
           path: content
 
       - name: Authenticate gh as M00rish
