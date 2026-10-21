@@ -1,0 +1,208 @@
+name: Build Android Emulator for Appetize
+
+on:
+  # Manual trigger only - never build on push (mirrors build-ios-simulator.yml)
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: "CPU type: x86_64 (Appetize emulator) or arm64-v8a (real phone)"
+        required: false
+        default: "x86_64"
+
+concurrency:
+  group: android-emulator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android-emulator:
+    name: Build Android Emulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      RCT_NEW_ARCH_ENABLED: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The runner (4 vCPU / 16 GB) was dying silently during the release lint step;
+      # free disk and add swap so memory spikes slow the build down instead of killing it.
+      - name: Free disk space and add swap
+        run: |
+          df -h / /mnt || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo fallocate -l 8G /mnt/extra.swap
+          sudo chmod 600 /mnt/extra.swap
+          sudo mkswap /mnt/extra.swap
+          sudo swapon /mnt/extra.swap
+          df -h / /mnt || true
+          free -h
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Node 26.5.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26.5.0'
+
+      - name: Setup Bun and NPM
+        run: |
+          curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.bun/bin:$PATH"
+          npm install -g npm@11.17.0
+          npm --version
+          bun --version
+
+      - name: Fix applyPatches script for Linux
+        run: |
+          if [ -f "./scripts/applyPatches.sh" ]; then
+            sed -i 's/mktemp --directory/mktemp -d/g' ./scripts/applyPatches.sh
+            sed -i 's/mktemp --tmpdir/mktemp -t/g' ./scripts/applyPatches.sh
+            sed -i 's/mktemp -d --tmpdir/mktemp -d -t/g' ./scripts/applyPatches.sh
+            echo "Fixed applyPatches.sh for Linux"
+            grep "mktemp" ./scripts/applyPatches.sh || true
+          fi
+
+      - name: Install JS dependencies
+        run: npm ci --registry=https://registry.npmjs.org --prefer-online --retry=3
+
+      - name: Patch Gemfile to remove openssl and fix ruby version
+        run: |
+          # Lower Ruby version requirement in Gemfile to 3.3.4 (Codemagic parity - fixes ruby 3.4.1 mismatch)
+          sed -i 's/ruby ">= 3\.4\.1"/ruby ">= 3.3.4"/g' Gemfile
+          # Remove openssl line from Gemfile (Codemagic parity - macOS sed '' vs Linux sed no '')
+          sed -i "/gem ['\"]openssl['\"].*/d" Gemfile
+          # Remove openssl entries from Gemfile.lock
+          sed -i "/^[[:space:]]*openssl (3\.3\.1)/d" Gemfile.lock
+          sed -i "/^[[:space:]]*openssl (>= 3\.3\.1)/d" Gemfile.lock
+          echo "=== Gemfile check ==="
+          grep "ruby" Gemfile
+          grep -i "openssl" Gemfile || echo "openssl successfully removed from Gemfile"
+
+      - name: Setup Ruby 3.4.1
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4.1'
+          bundler-cache: false
+
+      - name: Install Ruby dependencies
+        run: |
+          bundle config set --local default_gems false
+          bundle install
+
+      - name: Patch ProGuard and build.gradle for test build
+        run: |
+          PROGUARD_FILE="android/app/proguard-rules.pro"
+          GRADLE_FILE="android/app/build.gradle"
+          # 1. Append R8 ignore rules to ProGuard file (Fixes R8 missing class errors - from codemagic_Android.yaml:53)
+          echo "" >> "$PROGUARD_FILE"
+          echo "-dontwarn com.google.android.gms.safetynet.**" >> "$PROGUARD_FILE"
+          echo "-keep class com.google.android.gms.safetynet.** { *; }" >> "$PROGUARD_FILE"
+          # 2. Disable minification (handles Groovy & Kotlin DSL variants - Codemagic parity with Linux sed)
+          sed -i.bak -E 's/(isMinifyEnabled|minifyEnabled)[[:space:]]*=?[[:space:]]*true/\1 false/g' "$GRADLE_FILE"
+          sed -i.bak -E 's/(isShrinkResources|shrinkResources)[[:space:]]*=?[[:space:]]*true/\1 false/g' "$GRADLE_FILE"
+          # 3. Force debug signing across all productFlavors (Codemagic parity)
+          sed -i.bak 's|productFlavors\.production\.signingConfig|// productFlavors.production.signingConfig|g' "$GRADLE_FILE"
+          sed -i.bak '/signingConfig null/d' "$GRADLE_FILE"
+          sed -i.bak 's|flavor\.signingConfig.*|flavor.signingConfig signingConfigs.debug|g' "$GRADLE_FILE"
+          sed -i.bak 's|productFlavors\.e2e\.signingConfig|// productFlavors.e2e.signingConfig|g' "$GRADLE_FILE"
+          sed -i.bak 's|productFlavors\.e2edelta\.signingConfig|// productFlavors.e2edelta.signingConfig|g' "$GRADLE_FILE"
+          sed -i.bak 's|signingConfig signingConfigs\.release|signingConfig signingConfigs.debug|g' "$GRADLE_FILE"
+          rm -f "${GRADLE_FILE}.bak"
+          echo "=== Patched ProGuard rules and build.gradle successfully ==="
+          grep -n "minifyEnabled\|shrinkResources\|signingConfig" "$GRADLE_FILE" | head -n 30
+
+      # Build one ABI only: x86_64 for Appetize's emulator (default) or arm64-v8a for a real
+      # phone (appbuild start android --device). Also skip the release-only lintVital tasks.
+      - name: Slim the build for the emulator
+        run: |
+          sed -i -E 's/^reactNativeArchitectures=.*/reactNativeArchitectures=${{ inputs.abi || 'x86_64' }}/' android/gradle.properties
+          grep -n "reactNativeArchitectures" android/gradle.properties
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/skip-lint-vital.gradle <<'EOF'
+          gradle.beforeProject { p ->
+              p.tasks.configureEach { t ->
+                  if (t.name.startsWith('lintVital')) {
+                      t.enabled = false
+                  }
+              }
+          }
+          EOF
+          cat ~/.gradle/init.d/skip-lint-vital.gradle
+
+      - name: Build Android App
+        env:
+          ORG_GRADLE_PROJECT_reactNativeArchitectures: ${{ inputs.abi || 'x86_64' }}
+        run: |
+          npm run android-build
+          free -h
+
+      # Release crashes only show bundle offsets (index.android.bundle:1:<n>); keep the JS sourcemap
+      # so they can be mapped back to source files (appbuild maps <runId>).
+      - name: Collect JS sourcemap for crash debugging
+        if: always()
+        run: |
+          mkdir -p js-sourcemaps
+          find android/app/build -name '*.map' \( -path '*sourcemap*' -o -name '*.bundle.map' \) -type f 2>/dev/null | tee js-sourcemaps/found.txt
+          while read -r m; do cp "$m" "js-sourcemaps/$(echo "$m" | tr '/' '_')"; done < js-sourcemaps/found.txt
+          ls -lh js-sourcemaps
+
+      - name: Upload JS sourcemap
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: js-sourcemap
+          path: js-sourcemaps
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Find APK and prepare for Appetize
+        run: |
+          find android/app/build/outputs/apk -name "*.apk" -type f | head -n 20
+          APK=$(find android/app/build/outputs/apk -name "*.apk" -type f | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "Error: Could not find APK"
+            exit 1
+          fi
+          echo "Found APK at: $APK"
+          ls -lh "$APK"
+          cp "$APK" ./Expensify-debug.apk
+          ls -lh ./Expensify-debug.apk
+
+      - name: Upload to Appetize
+        # Appetize runs x86_64 only; a phone build is only downloaded (appbuild apk <runId>).
+        if: ${{ (inputs.abi || 'x86_64') == 'x86_64' }}
+        env:
+          APPETIZE_API_TOKEN: ${{ secrets.APPETIZE_API_TOKEN }}
+        run: |
+          echo "Uploading to Appetize..."
+          RESPONSE=$(curl --silent \
+            -u "${APPETIZE_API_TOKEN}:" \
+            -F "file=@Expensify-debug.apk" \
+            -F "platform=android" \
+            -F "note=${GITHUB_REF_NAME} - ${GITHUB_SHA:0:7}" \
+            https://api.appetize.io/v1/apps)
+          echo "Appetize response:"
+          echo "$RESPONSE"
+          PUBLIC_KEY=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('publicKey',''))" 2>/dev/null || echo "")
+          if [ -n "$PUBLIC_KEY" ]; then
+            echo "Upload successful!"
+            echo "Appetize URL: https://appetize.io/app/$PUBLIC_KEY"
+            echo "Appetize debug URL (device log visible): https://appetize.io/app/$PUBLIC_KEY?debug=true"
+          else
+            echo "Upload may have failed, check response above"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Expensify-debug-apk
+          path: Expensify-debug.apk
+          if-no-files-found: error
+          retention-days: 7
